@@ -7,7 +7,7 @@ from torch import nn
 import torch.nn.functional as F
 import torch.fft
 from recbole.model.abstract_recommender import SequentialRecommender
-from recbole.model.layers import TransformerEncoder,AttackRTransformerEncoder
+from recbole.model.layers import TransformerEncoder
 from recbole.model.loss import BPRLoss
 from sklearn.cluster import KMeans, MiniBatchKMeans
 

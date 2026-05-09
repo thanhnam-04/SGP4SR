@@ -5,13 +5,15 @@ load_col:
   inter: [ user_id, item_id_list, item_id ]
 neg_sampling: ~
 transform: ~
+train_neg_sample_args: ~
 
 topk: [ 5, 10, 20, 50 ]
 metrics: [ Recall, NDCG ]
 valid_metric: Recall@5
 eval_batch_size: 1024
-train_batch_size: 256
-stopping_step: 10
+train_batch_size: 512
+stopping_step: 15
+epochs: 30
 
 gpu_id: '0'
 log_prefix: ''
