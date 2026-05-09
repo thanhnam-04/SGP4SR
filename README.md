@@ -89,6 +89,54 @@ python run.py -d baby
 python run.py -d office
 ```
 
+### Train/evaluate với `baby_modern_bge_siglip.tar.gz`
+
+Giữ nguyên file nén ở đường dẫn:
+
+```text
+dataset/baby_modern_bge_siglip.tar.gz
+```
+
+Giải nén và chuẩn bị dataset cho pipeline train:
+
+```bash
+python scripts/prepare_baby_modern.py
+```
+
+Sau khi chạy xong, script sẽ tạo thư mục:
+
+```text
+dataset/baby_modern/
+|-- baby_modern.train.inter
+|-- baby_modern.valid.inter
+|-- baby_modern.test.inter
+|-- baby_modern.text
+|-- baby_modern.image
+`-- metadata/
+```
+
+Trong đó:
+
+- `baby_modern.train.inter`: tập train.
+- `baby_modern.valid.inter`: tập validation dùng trong quá trình train/early stopping.
+- `baby_modern.test.inter`: tập test dùng để đánh giá cuối cùng.
+- `baby_modern.text`: vector BGE, shape `(7015, 768)`.
+- `baby_modern.image`: vector SigLIP, shape `(7015, 768)`.
+
+Chạy training trên tập train và đánh giá trên tập test:
+
+```bash
+python run.py -d baby_modern
+```
+
+Hoặc giải nén/chuẩn bị data và chạy train trong một lệnh:
+
+```bash
+python scripts/prepare_baby_modern.py --run-train
+```
+
+Kết quả evaluation được ghi theo logic hiện tại trong `run.py`, bao gồm `best_valid_result` và `test_result`.
+
 Config files:
 - `SGP4SR.yaml` – Model hyperparameters
 - `run.yaml` – Data & training configs

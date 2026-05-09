@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+
+dataset/_extracted/
+dataset/baby_modern/
+
+model/
+saved/
+log/
+logs/
+results/
+*.pth
