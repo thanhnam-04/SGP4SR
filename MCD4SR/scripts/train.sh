@@ -3,3 +3,8 @@ CUDA_VISIBLE_DEVICES=0 nohup python train_denoiser_main.py --benchmark Amazon --
 CUDA_VISIBLE_DEVICES=0 nohup python train_denoiser_main.py --benchmark Amazon --dataset toys --lr_encoder 1e-4 --temperature 0.2 --exp_name amazon_toys_lrenc0001 > ./log/amazon_toys_lrenc0001.log 2>&1 &
 CUDA_VISIBLE_DEVICES=0 nohup python train_denoiser_main.py --benchmark Amazon --dataset electronics --lr_encoder 1e-4 --temperature 0.2 --exp_name amazon_electronics_lrenc0001 > ./log/amazon_electronics_lrenc0001.log 2>&1 &
 CUDA_VISIBLE_DEVICES=0 nohup python train_denoiser_main.py --benchmark Amazon --dataset office --lr_encoder 1e-4 --temperature 0.2 --exp_name amazon_office_lrenc0001 > ./log/amazon_office_lrenc0001.log 2>&1 &
+
+# Baby Modern SigLIP Large
+python scripts/prepare_baby_modern_mcd.py
+mkdir -p ./log
+CUDA_VISIBLE_DEVICES=0 nohup python train_denoiser_main.py --benchmark Amazon --dataset baby_modern --lr_encoder 1e-4 --temperature 0.2 --exp_name baby_modern_siglip_large > ./log/baby_modern_siglip_large.log 2>&1 &

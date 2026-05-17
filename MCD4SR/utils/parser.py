@@ -12,7 +12,7 @@ def get_args():
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--mu", type=float, default=2.0)
     parser.add_argument("--moct_t", type=float, default=5.0)
-    parser.add_argument('--dataset', type=str, choices=['beauty', 'electronics', 'toys', 'office', 'home', 'clothing'], help='')
+    parser.add_argument('--dataset', type=str, choices=['beauty', 'electronics', 'toys', 'office', 'home', 'clothing', 'baby_modern'], help='')
     parser.add_argument("--w_icla", type=float, default=0.4)
     parser.add_argument("--w_simw", type=float, default=1.0)
     parser.add_argument("--w_balw", type=float, default=0.1)

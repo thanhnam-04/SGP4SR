@@ -87,17 +87,20 @@ class MultiHeadAttention(nn.Module):
         keys = keys.view(B, L_kv, self.num_heads, self.head_dim).transpose(1, 2)
         values = values.view(B, L_kv, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # construct attn_mask -> [B, num_heads, L_q, L_kv]
+        # construct additive attn_mask -> [B, 1, L_q, L_kv]
         attn_mask = None
         if padding_mask is not None or kv_padding_mask is not None:
-            if padding_mask is None:
-                padding_mask = torch.ones((B, L_q), dtype=torch.bool, device=x.device)
             if kv_padding_mask is None:
                 kv_padding_mask = torch.ones((B, L_kv), dtype=torch.bool, device=x.device)
 
-            # [B, 1, L_q, 1] & [B, 1, 1, L_kv] -> broadcast to [B, num_heads, L_q, L_kv]
-            attn_mask = padding_mask[:, None, :, None] & kv_padding_mask[:, None, None, :]
-            attn_mask = attn_mask.masked_fill(~attn_mask, float('-inf'))
+            valid_mask = kv_padding_mask[:, None, None, :].expand(B, 1, L_q, L_kv)
+            if is_causal:
+                causal_mask = torch.ones((L_q, L_kv), dtype=torch.bool, device=x.device).tril()
+                valid_mask = valid_mask & causal_mask[None, None, :, :]
+                is_causal = False
+
+            attn_mask = torch.zeros((B, 1, L_q, L_kv), dtype=queries.dtype, device=x.device)
+            attn_mask = attn_mask.masked_fill(~valid_mask, float('-inf'))
 
         # scaled dot-product attention
         context_vec = self.attend(queries, keys, values, attn_mask=attn_mask, is_causal=is_causal)
