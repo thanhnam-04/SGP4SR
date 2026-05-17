@@ -195,7 +195,7 @@ Test result sau khi load best model:
   "recall@5": 0.0355,
   "recall@10": 0.0576,
   "recall@20": 0.0848,
-  "recall@50": 0.1404,
+  "recall@50": 0.1404,  
   "ndcg@5": 0.0229,
   "ndcg@10": 0.0301,
   "ndcg@20": 0.0369,
