@@ -10,13 +10,13 @@ train_neg_sample_args: ~
 topk: [ 5, 10, 20, 50 ]
 metrics: [ Recall, NDCG ]
 valid_metric: Recall@5
-eval_batch_size: 1024
+eval_batch_size: 512
 train_batch_size: 512
 learning_rate: 0.0003
 weight_decay: 1e-5
 MAX_ITEM_LIST_LENGTH: 123
-stopping_step: 10
-epochs: 10
+stopping_step: 7
+epochs: 50
 
 gpu_id: '0'
 log_prefix: ''

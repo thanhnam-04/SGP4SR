@@ -25,7 +25,7 @@ Sequential recommendation model incorporating semantic and graph pooling.
 Data của project được unzip trực tiếp từ file:
 
 ```text
-/kaggle/SGP4SR/dataset/baby_modern_bge_siglip.tar.gz
+/kaggle/SGP4SR/SGP4SR/dataset/baby_modern_bge_siglip.tar.gz
 ```
 
 File nén này đã chứa sẵn:
@@ -41,7 +41,7 @@ File nén này đã chứa sẵn:
 Chạy các lệnh sau từ thư mục project:
 
 ```bash
-cd /kaggle/SGP4SR
+cd /kaggle/SGP4SR/SGP4SR
 
 mkdir -p dataset/baby_modern_raw_unzip
 tar -xzf dataset/baby_modern_bge_siglip.tar.gz -C dataset/baby_modern_raw_unzip
@@ -70,7 +70,7 @@ dataset/baby_modern_raw_unzip/
 RecBole đọc dataset theo tên folder và tên file cùng prefix. Vì folder train sẽ là `baby_modern_raw_unzip`, cần tạo các symlink sau:
 
 ```bash
-cd /kaggle/SGP4SR
+cd /kaggle/SGP4SR/SGP4SR
 
 ln -sf baby_modern/dataset/baby/baby.train.inter dataset/baby_modern_raw_unzip/baby_modern_raw_unzip.train.inter
 ln -sf baby_modern/dataset/baby/baby.valid.inter dataset/baby_modern_raw_unzip/baby_modern_raw_unzip.valid.inter
@@ -110,7 +110,7 @@ baby_modern_raw_unzip
 Có thể chạy toàn bộ bước unzip + tạo symlink bằng block sau:
 
 ```bash
-cd /kaggle/SGP4SR
+cd /kaggle/SGP4SR/SGP4SR
 
 mkdir -p dataset/baby_modern_raw_unzip
 tar -xzf dataset/baby_modern_bge_siglip.tar.gz -C dataset/baby_modern_raw_unzip
@@ -129,7 +129,7 @@ ln -sf baby_modern/image_features_siglip.npy dataset/baby_modern_raw_unzip/baby_
 Chạy thử vài step để kiểm tra data, embedding, model forward/backward đều hoạt động:
 
 ```bash
-cd /kaggle/SGP4SR
+cd /kaggle/SGP4SR/SGP4SR
 python run.py -d baby_modern_raw_unzip --smoke-steps 2
 ```
 
@@ -145,7 +145,7 @@ smoke step 2/2 loss=...
 Chạy training full trên tập train, validate trên tập valid, và evaluate trên tập test:
 
 ```bash
-cd /kaggle/SGP4SR
+cd /kaggle/SGP4SR/SGP4SR
 python run.py -d baby_modern_raw_unzip
 ```
 

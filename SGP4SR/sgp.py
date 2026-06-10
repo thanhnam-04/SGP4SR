@@ -28,6 +28,29 @@ class PointWiseFeedForward(torch.nn.Module):
         outputs = outputs.transpose(-1, -2) # as Conv1D requires (N, C, Length)
         outputs += inputs
         return outputs 
+
+
+class IntentAwareWeightMapper(torch.nn.Module):
+    def __init__(self, hidden_size, temperature):
+        super(IntentAwareWeightMapper, self).__init__()
+        self.l1 = torch.nn.Linear(3 * hidden_size, hidden_size // 8)
+        self.l2 = torch.nn.Linear(hidden_size // 8, 3)
+        self.temperature = temperature
+
+    def forward(self, x):
+        x = x.view(x.shape[0], -1)
+        x = self.l1(x)
+        x = F.normalize(x, p=2, dim=1)
+        x = F.gelu(x)
+        x = self.l2(x) / self.temperature
+        return torch.softmax(x, dim=1)
+
+    def reset_to_prior(self, prior):
+        prior = torch.as_tensor(prior, dtype=self.l2.bias.dtype, device=self.l2.bias.device)
+        prior = prior / prior.sum()
+        with torch.no_grad():
+            self.l2.weight.zero_()
+            self.l2.bias.copy_(torch.log(prior.clamp_min(1e-8)) * self.temperature)
     
 class SGP(SequentialRecommender):
     r"""
@@ -47,10 +70,17 @@ class SGP(SequentialRecommender):
         self.miu_c = config['miu_c']
         self.miu_m = config['miu_m']
         self.mb = config['mb']
+        self.fusion_temperature = config['fusion_temperature']
+        self.fusion_scale = config['fusion_scale']
+        self.fusion_prior = config['fusion_prior']
+        self.fusion_dynamic_ratio = config['fusion_dynamic_ratio']
         self.kmeans = MiniBatchKMeans(n_clusters=self.means_k, init_size=1024, batch_size=1024, random_state=100)
         self.initializer_range = config['initializer_range']
         self.loss_type = config['loss_type']
         self.item_embedding = torch.nn.Embedding(self.n_items, self.hidden_size, padding_idx=0)
+        self.intent_weight_mapper = IntentAwareWeightMapper(self.hidden_size, self.fusion_temperature)
+        fusion_prior = torch.as_tensor(self.fusion_prior, dtype=torch.float32)
+        self.register_buffer("fusion_prior_weight", fusion_prior / fusion_prior.sum())
         
         self.ssl = 'us_x'
         self.aug_nce_fct = nn.CrossEntropyLoss()
@@ -85,6 +115,7 @@ class SGP(SequentialRecommender):
         self.senset, self.tsample = self.get_center(self.text_embs)
         self.loss_fct = nn.CrossEntropyLoss()
         self.apply(self._init_weights)
+        self.intent_weight_mapper.reset_to_prior(self.fusion_prior)
 
     def mod(self, build_item_graph=True):
         h = self.item_embedding.weight.to(self.device)
@@ -195,7 +226,18 @@ class SGP(SequentialRecommender):
         log_featst = self.last_layernorm(seqst + cent)
         outputv = self.gather_indexes(log_featsv, item_seq_len - 1) 
         outputt = self.gather_indexes(log_featst, item_seq_len - 1) 
-        seqs = ((1 - self.mb) * (seqst) + self.mb * (seqsv) + 0.6 * (seqsi))
+
+        u_id = self.gather_indexes(seqsi, item_seq_len - 1)
+        u_text = self.gather_indexes(seqst, item_seq_len - 1)
+        u_visual = self.gather_indexes(seqsv, item_seq_len - 1)
+        fusion_input = torch.cat([u_id, u_text, u_visual], dim=-1)
+        weights = self.intent_weight_mapper(fusion_input)
+        prior_weights = self.fusion_prior_weight.to(dtype=weights.dtype).view(1, -1)
+        weights = (1 - self.fusion_dynamic_ratio) * prior_weights + self.fusion_dynamic_ratio * weights
+        w_id = weights[:, 0].view(-1, 1, 1)
+        w_text = weights[:, 1].view(-1, 1, 1)
+        w_visual = weights[:, 2].view(-1, 1, 1)
+        seqs = self.fusion_scale * (w_id * seqsi + w_text * seqst + w_visual * seqsv)
 
         log_feats = self.last_layernorm(seqs) 
         output = self.gather_indexes(log_feats, item_seq_len - 1)   

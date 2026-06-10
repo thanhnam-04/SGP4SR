@@ -14,6 +14,10 @@ bal: 5
 miu_c: 0.3
 miu_m: 2.5
 mb: 0.1
+fusion_temperature: 0.2
+fusion_scale: 1.6
+fusion_prior: [0.375, 0.5625, 0.0625]
+fusion_dynamic_ratio: 0.3
 
 item_drop_ratio: 0.1
 item_drop_coefficient: 0.9
