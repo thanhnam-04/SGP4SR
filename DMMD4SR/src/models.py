@@ -116,10 +116,38 @@ class SASRecModel(nn.Module):
     def replace_embedding(self):
         """ multimodal init """
 
-        text_features_list = torch.load(self.args.text_embedding_path)
-        image_features_list = torch.load(self.args.image_embedding_path)
-        self.img_embeddings.weight.data[1:-1, :] = image_features_list
-        self.text_embeddings.weight.data[1:-1, :] = text_features_list
+        text_features_list = self._load_feature_tensor(self.args.text_embedding_path)
+        image_features_list = self._load_feature_tensor(self.args.image_embedding_path)
+        self._copy_feature_weight(self.text_embeddings, text_features_list)
+        self._copy_feature_weight(self.img_embeddings, image_features_list)
+
+    def _load_feature_tensor(self, path):
+        if path.endswith(".npy") or not path.endswith(".pt"):
+            return torch.from_numpy(np.load(path)).float()
+        return torch.load(path, map_location="cpu").float()
+
+    def _copy_feature_weight(self, embedding, features):
+        if features.shape[1] != embedding.embedding_dim:
+            raise ValueError(
+                f"Feature dim {features.shape[1]} does not match pretrain_emb_dim "
+                f"{embedding.embedding_dim}. Set --pretrain_emb_dim {features.shape[1]}."
+            )
+
+        token_ids = getattr(self.args, "item_token_ids", None)
+        if token_ids is None:
+            copy_len = min(features.shape[0], embedding.weight.data.shape[0] - 2)
+            embedding.weight.data[1:1 + copy_len, :] = features[:copy_len]
+            return
+
+        for internal_id, token in enumerate(token_ids):
+            if internal_id == 0 or token is None:
+                continue
+            try:
+                feature_idx = int(token)
+            except ValueError:
+                continue
+            if 0 <= feature_idx < features.shape[0] and internal_id < embedding.weight.data.shape[0]:
+                embedding.weight.data[internal_id, :] = features[feature_idx]
     
     def multimodal_fusion(self, text_embeddings, img_embeddings, item_embeddings=None):
         """

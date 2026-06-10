@@ -3,10 +3,166 @@ import random
 import torch
 import os
 import pickle
+import numpy as np
+from scipy.sparse import csr_matrix
 
 from torch.utils.data import Dataset
 from utils import neg_sample,get_user_seqs
 import copy
+
+
+def _read_recbole_inter(path):
+    rows = []
+    with open(path, "r", encoding="utf-8") as fr:
+        for line_no, line in enumerate(fr):
+            line = line.strip()
+            if not line:
+                continue
+            if line_no == 0 and ":" in line and "item_id_list" in line:
+                continue
+            parts = line.split("\t")
+            if len(parts) != 3:
+                raise ValueError(f"Invalid RecBole inter row in {path}: {line}")
+            user_token, seq_tokens, target_token = parts
+            seq = seq_tokens.split() if seq_tokens else []
+            rows.append((user_token, seq, target_token))
+    return rows
+
+
+def _feature_item_tokens(text_embedding_path, image_embedding_path):
+    feature_path = text_embedding_path or image_embedding_path
+    if not feature_path:
+        return []
+    if feature_path.endswith(".npy") or not feature_path.endswith(".pt"):
+        features = np.load(feature_path, mmap_mode="r")
+        return [str(i) for i in range(features.shape[0])]
+    features = torch.load(feature_path, map_location="cpu")
+    return [str(i) for i in range(int(features.shape[0]))]
+
+
+def load_recbole_sgp_data(args):
+    prefix = os.path.join(args.data_dir, args.data_name)
+    train_rows = _read_recbole_inter(prefix + ".train.inter")
+    valid_rows = _read_recbole_inter(prefix + ".valid.inter")
+    test_rows = _read_recbole_inter(prefix + ".test.inter")
+
+    item_tokens = set(_feature_item_tokens(args.text_embedding_path, args.image_embedding_path))
+    for rows in (train_rows, valid_rows, test_rows):
+        for _, seq, target in rows:
+            item_tokens.update(seq)
+            item_tokens.add(target)
+
+    def sort_key(token):
+        try:
+            return (0, int(token))
+        except ValueError:
+            return (1, token)
+
+    sorted_tokens = sorted(item_tokens, key=sort_key)
+    token_to_id = {token: idx + 1 for idx, token in enumerate(sorted_tokens)}
+    id_to_token = [None] + sorted_tokens
+
+    def convert(rows):
+        examples = []
+        user_tokens = []
+        for user_token, seq, target in rows:
+            mapped_seq = [token_to_id[token] for token in seq]
+            mapped_target = token_to_id[target]
+            examples.append((mapped_seq, mapped_target))
+            user_tokens.append(user_token)
+        return examples, user_tokens
+
+    train_examples, _ = convert(train_rows)
+    valid_examples, valid_user_tokens = convert(valid_rows)
+    test_examples, test_user_tokens = convert(test_rows)
+    item_size = len(id_to_token) + 1
+
+    def rating_matrix(examples):
+        row, col, data = [], [], []
+        for user_idx, (seq, _) in enumerate(examples):
+            for item in seq:
+                row.append(user_idx)
+                col.append(item)
+                data.append(1)
+        return csr_matrix(
+            (np.array(data), (np.array(row), np.array(col))),
+            shape=(len(examples), item_size),
+        )
+
+    args.item_token_ids = id_to_token
+    args.item_size = item_size
+    args.mask_id = len(id_to_token)
+    return {
+        "train_examples": train_examples,
+        "valid_examples": valid_examples,
+        "test_examples": test_examples,
+        "valid_user_tokens": valid_user_tokens,
+        "test_user_tokens": test_user_tokens,
+        "valid_rating_matrix": rating_matrix(valid_examples),
+        "test_rating_matrix": rating_matrix(test_examples),
+    }
+
+
+class RecBoleSequentialDataset(Dataset):
+    def __init__(self, args, examples, data_type="train"):
+        self.args = args
+        self.examples = examples
+        self.data_type = data_type
+        self.max_len = args.max_seq_length
+
+    def _pad(self, values):
+        values = values[-self.max_len:]
+        return [0] * (self.max_len - len(values)) + values
+
+    def _add_noise_interactions(self, items):
+        copied_sequence = copy.deepcopy(items)
+        insert_nums = max(int(self.args.noise_ratio * len(copied_sequence)), 0)
+        if insert_nums == 0:
+            return copied_sequence
+        insert_idx = random.choices([i for i in range(len(copied_sequence))], k=insert_nums)
+        inserted_sequence = []
+        for index, item in enumerate(copied_sequence):
+            if index in insert_idx:
+                item_id = random.randint(1, self.args.item_size - 1)
+                while item_id in copied_sequence:
+                    item_id = random.randint(1, self.args.item_size - 1)
+                inserted_sequence.append(item_id)
+            inserted_sequence.append(item)
+        return inserted_sequence
+
+    def __getitem__(self, index):
+        seq, target = self.examples[index]
+        if self.data_type == "test":
+            full_seq = self._add_noise_interactions(seq + [target])
+            input_ids = full_seq[:-1]
+            answer = full_seq[-1]
+        else:
+            input_ids = seq
+            answer = target
+
+        target_pos = input_ids[1:] + [answer]
+        input_ids = self._pad(input_ids)
+        target_pos = self._pad(target_pos)
+        answer_tensor = [answer]
+
+        if self.data_type == "train":
+            return (
+                torch.tensor(index, dtype=torch.long),
+                torch.tensor(input_ids, dtype=torch.long),
+                torch.tensor(target_pos, dtype=torch.long),
+                torch.tensor(target_pos, dtype=torch.long),
+                torch.tensor(answer_tensor, dtype=torch.long),
+            )
+
+        return (
+            torch.tensor(index, dtype=torch.long),
+            torch.tensor(input_ids, dtype=torch.long),
+            torch.tensor(target_pos, dtype=torch.long),
+            torch.tensor(answer_tensor, dtype=torch.long),
+        )
+
+    def __len__(self):
+        return len(self.examples)
 
 
 class Generate_tag():

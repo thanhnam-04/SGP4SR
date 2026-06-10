@@ -5,7 +5,12 @@ import argparse
 
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
-from datasets import RecWithContrastiveLearningDataset,DS
+from datasets import (
+    RecWithContrastiveLearningDataset,
+    RecBoleSequentialDataset,
+    DS,
+    load_recbole_sgp_data,
+)
 
 from trainers import ICLRecTrainer
 from models import SASRecModel
@@ -24,6 +29,7 @@ def main():
     parser.add_argument("--data_dir", default="../process_data/", type=str)
     parser.add_argument("--output_dir", default="output/", type=str)
     parser.add_argument("--data_name", default="Toys", type=str)  # [Sports_and_Outdoors, Beauty, Toys_and_Games, Home]
+    parser.add_argument("--data_format", default="sequence", choices=["sequence", "recbole"], type=str)
     parser.add_argument("--encoder",default="SAS",type=str) 
     parser.add_argument("--do_eval", action="store_true")
     parser.add_argument("--model_idx", default=0, type=int, help="model idenfier 10, 20, 30...")
@@ -102,20 +108,28 @@ def main():
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
     args.cuda_condition = torch.cuda.is_available() and not args.no_cuda
     print("Using Cuda:", torch.cuda.is_available())
-    args.data_file = args.data_dir + args.data_name + ".txt"
-    args.train_data_file = args.data_dir + args.data_name + "_1.txt"
+    if args.data_format == "recbole":
+        recbole_data = load_recbole_sgp_data(args)
+        if args.pretrain_emb_dim == 512:
+            if args.text_embedding_path.endswith(".npy") or not args.text_embedding_path.endswith(".pt"):
+                args.pretrain_emb_dim = int(np.load(args.text_embedding_path, mmap_mode="r").shape[1])
+            else:
+                args.pretrain_emb_dim = int(torch.load(args.text_embedding_path, map_location="cpu").shape[1])
+    else:
+        args.data_file = args.data_dir + args.data_name + ".txt"
+        args.train_data_file = args.data_dir + args.data_name + "_1.txt"
 
-    # construct supervisory signals via DS(·) operation
-    if not os.path.exists(args.train_data_file):
-        DS(args.data_file,args.train_data_file,args.max_seq_length)
+        # construct supervisory signals via DS(·) operation
+        if not os.path.exists(args.train_data_file):
+            DS(args.data_file,args.train_data_file,args.max_seq_length)
 
-    # training data
-    _,train_user_seq, _, _, _ = get_user_seqs(args.train_data_file)
-    # valid and test data
-    _,user_seq, max_item, valid_rating_matrix, test_rating_matrix = get_user_seqs(args.data_file)
+        # training data
+        _,train_user_seq, _, _, _ = get_user_seqs(args.train_data_file)
+        # valid and test data
+        _,user_seq, max_item, valid_rating_matrix, test_rating_matrix = get_user_seqs(args.data_file)
 
-    args.item_size = max_item + 2
-    args.mask_id = max_item + 1
+        args.item_size = max_item + 2
+        args.mask_id = max_item + 1
     # save model args
     args_str = f"{args.model_name}-{args.encoder}-{args.data_name}-{args.model_idx}"
     args.log_file = os.path.join(args.output_dir, args_str + ".txt")
@@ -126,31 +140,54 @@ def main():
         f.write(str(args) + "\n")
 
     # set item score in train set to `0` in validation
-    args.train_matrix = valid_rating_matrix
+    if args.data_format == "recbole":
+        args.train_matrix = recbole_data["valid_rating_matrix"]
+    else:
+        args.train_matrix = valid_rating_matrix
 
     # save model
     checkpoint = args_str + ".pt"
     args.checkpoint_path = os.path.join(args.output_dir, checkpoint)
 
     # cluster
-    cluster_dataset = RecWithContrastiveLearningDataset(
-        args, train_user_seq, data_type="train"
-    )
+    if args.data_format == "recbole":
+        cluster_dataset = RecBoleSequentialDataset(
+            args, recbole_data["train_examples"], data_type="train"
+        )
+    else:
+        cluster_dataset = RecWithContrastiveLearningDataset(
+            args, train_user_seq, data_type="train"
+        )
     cluster_sampler = SequentialSampler(cluster_dataset)
     cluster_dataloader = DataLoader(cluster_dataset, sampler=cluster_sampler, batch_size=args.batch_size)
 
     # training data
-    train_dataset = RecWithContrastiveLearningDataset(
-        args, train_user_seq, data_type="train"
-    )
+    if args.data_format == "recbole":
+        train_dataset = RecBoleSequentialDataset(
+            args, recbole_data["train_examples"], data_type="train"
+        )
+    else:
+        train_dataset = RecWithContrastiveLearningDataset(
+            args, train_user_seq, data_type="train"
+        )
     train_sampler = RandomSampler(train_dataset)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.batch_size)
 
-    eval_dataset = RecWithContrastiveLearningDataset(args, user_seq, data_type="valid")
+    if args.data_format == "recbole":
+        eval_dataset = RecBoleSequentialDataset(
+            args, recbole_data["valid_examples"], data_type="valid"
+        )
+    else:
+        eval_dataset = RecWithContrastiveLearningDataset(args, user_seq, data_type="valid")
     eval_sampler = SequentialSampler(eval_dataset)
     eval_dataloader = DataLoader(eval_dataset, sampler=eval_sampler, batch_size=args.batch_size)
 
-    test_dataset = RecWithContrastiveLearningDataset(args, user_seq, data_type="test")
+    if args.data_format == "recbole":
+        test_dataset = RecBoleSequentialDataset(
+            args, recbole_data["test_examples"], data_type="test"
+        )
+    else:
+        test_dataset = RecWithContrastiveLearningDataset(args, user_seq, data_type="test")
     test_sampler = SequentialSampler(test_dataset)
     test_dataloader = DataLoader(test_dataset, sampler=test_sampler, batch_size=args.batch_size)
 
@@ -159,7 +196,10 @@ def main():
     trainer = ICLRecTrainer(model, train_dataloader,cluster_dataloader, eval_dataloader, test_dataloader, args)
 
     if args.do_eval:
-        trainer.args.train_matrix = test_rating_matrix
+        if args.data_format == "recbole":
+            trainer.args.train_matrix = recbole_data["test_rating_matrix"]
+        else:
+            trainer.args.train_matrix = test_rating_matrix
         trainer.load(args.checkpoint_path)
 
         print(f"Load model from {args.checkpoint_path} for test!")
@@ -176,7 +216,10 @@ def main():
             if early_stopping.early_stop:
                 print("Early stopping")
                 break
-        trainer.args.train_matrix = test_rating_matrix
+        if args.data_format == "recbole":
+            trainer.args.train_matrix = recbole_data["test_rating_matrix"]
+        else:
+            trainer.args.train_matrix = test_rating_matrix
         print("---------------Change to test_rating_matrix!-------------------")
         # load the best model
         trainer.model.load_state_dict(torch.load(args.checkpoint_path))
