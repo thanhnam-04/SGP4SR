@@ -26,6 +26,30 @@ from sgp import SGP
 
 from recbole.trainer import Trainer
 
+
+def cfg_get(config, key, default=None):
+    return config[key] if key in config else default
+
+
+def torch_load_compat(path, map_location=None):
+    kwargs = {}
+    if map_location is not None:
+        kwargs['map_location'] = map_location
+    if 'weights_only' in inspect.signature(torch.load).parameters:
+        kwargs['weights_only'] = False
+    return torch.load(path, **kwargs)
+
+
+def load_model_checkpoint(model, checkpoint_path, logger):
+    checkpoint = torch_load_compat(checkpoint_path, map_location=model.device)
+    state_dict = checkpoint.get('state_dict', checkpoint) if isinstance(checkpoint, dict) else checkpoint
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    logger.info(
+        f"Loaded baseline checkpoint from {checkpoint_path}. "
+        f"missing={len(missing)} unexpected={len(unexpected)}"
+    )
+
+
 def get_logger_filename(logger):
     file_handler = next((handler for handler in logger.handlers if isinstance(handler, FileHandler)), None)
     if file_handler:
@@ -56,6 +80,75 @@ def run_smoke_train_steps(config, model, train_data, steps):
         losses.append(loss_value)
         print(f"smoke step {step}/{steps} loss={loss_value:.6f}")
     return losses
+
+
+def pretrain_baseline_epochs(config, model, train_data, epochs, logger):
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=config['learning_rate'],
+        weight_decay=config['weight_decay'],
+    )
+    for epoch in range(int(epochs)):
+        model.train()
+        total_loss = 0.0
+        steps = 0
+        for interaction in train_data:
+            interaction = interaction.to(config['device'])
+            optimizer.zero_grad()
+            loss = model.calculate_loss(interaction)
+            loss.backward()
+            optimizer.step()
+            total_loss += float(loss.detach().cpu())
+            steps += 1
+        msg = f"[diffusion] baseline pretrain epoch {epoch + 1}/{epochs} loss={total_loss / max(steps, 1):.6f}"
+        print(msg)
+        logger.info(msg)
+
+
+def prepare_diffusion_denoiser(config, model, train_data, logger):
+    if not bool(cfg_get(config, 'use_diffusion_denoiser', False)):
+        return
+
+    checkpoint_path = str(cfg_get(config, 'baseline_checkpoint_path', '') or '')
+    if checkpoint_path:
+        load_model_checkpoint(model, checkpoint_path, logger)
+    else:
+        pretrain_epochs = int(cfg_get(config, 'baseline_pretrain_epochs', 5))
+        if pretrain_epochs <= 0:
+            logger.warning(
+                "Diffusion denoiser enabled without baseline checkpoint and baseline_pretrain_epochs <= 0. "
+                "The ID condition will come from the current model weights."
+            )
+        else:
+            pretrain_baseline_epochs(config, model, train_data, pretrain_epochs, logger)
+
+    model.warmup_diffusion_denoiser(
+        epochs=int(cfg_get(config, 'diffusion_warmup_epochs', 5)),
+        batch_size=int(cfg_get(config, 'diffusion_batch_size', 1024)),
+        lr=float(cfg_get(config, 'diffusion_lr', 0.001)),
+        beta_graph=float(cfg_get(config, 'beta_graph', 0.01)),
+        logger=logger,
+    )
+    clean_text, clean_image = model.generate_clean_modal_features(
+        batch_size=int(cfg_get(config, 'diffusion_batch_size', 1024))
+    )
+    blend_alpha = float(cfg_get(config, 'denoiser_blend_alpha', 0.2))
+    blend_alpha = min(max(blend_alpha, 0.0), 1.0)
+    # Blend clean/raw modal features so diffusion nudges CGC/CIP instead of replacing strong raw signals.
+    final_text = blend_alpha * clean_text + (1.0 - blend_alpha) * model.raw_text_embs
+    final_image = blend_alpha * clean_image + (1.0 - blend_alpha) * model.raw_img_embs
+    final_text[0].zero_()
+    final_image[0].zero_()
+    model.build_modal_structures(final_text, final_image)
+    for p in model.diffusion_denoiser.parameters():
+        p.requires_grad = False
+    msg = (
+        f"[diffusion] rebuilt CGC/CIP with blended features alpha={blend_alpha}: "
+        f"co_vm_adj={tuple(model.co_vm_adj.shape)} co_tm_adj={tuple(model.co_tm_adj.shape)} "
+        f"sensev={tuple(model.sensev.shape)} senset={tuple(model.senset.shape)}"
+    )
+    print(msg)
+    logger.info(msg)
 
 
 def run(dataset, setting='SGP4SR.yaml,run.yaml',log_prefix="", **kwargs):
@@ -98,7 +191,7 @@ def run(dataset, setting='SGP4SR.yaml,run.yaml',log_prefix="", **kwargs):
     # RecBole Trainer calls `.get()` on it.
     try:
         if str(config['loss_type']).upper() == 'CE':
-            tna = config.get('train_neg_sample_args', None)
+            tna = cfg_get(config, 'train_neg_sample_args', None)
             if tna is None:
                 config['train_neg_sample_args'] = {
                     'distribution': 'none',
@@ -137,6 +230,7 @@ def run(dataset, setting='SGP4SR.yaml,run.yaml',log_prefix="", **kwargs):
         co_lens = np.ones(len(train_data.dataset), dtype=np.int64)
     
     model = SGP(config, train_data.dataset, co_data, co_lens).to(config['device'])
+    prepare_diffusion_denoiser(config, model, train_data, logger)
     logger.info(model)
     trainer = Trainer(config, model)
 
@@ -215,7 +309,35 @@ if __name__ == '__main__':
     parser.add_argument('-setting', type=str, default='SGP4SR.yaml,run.yaml')
     parser.add_argument('-note', type=str, default='')
     parser.add_argument('--smoke-steps', type=int, default=0)
+    parser.add_argument('--use-diffusion-denoiser', action='store_true')
+    parser.add_argument('--baseline-checkpoint-path', type=str, default='')
+    parser.add_argument('--baseline-pretrain-epochs', type=int, default=5)
+    parser.add_argument('--diffusion-warmup-epochs', type=int, default=5)
+    parser.add_argument('--diffusion-lr', type=float, default=0.001)
+    parser.add_argument('--diffusion-batch-size', type=int, default=1024)
+    parser.add_argument('--diffusion-steps', type=int, default=8)
+    parser.add_argument('--beta-graph', type=float, default=0.01)
+    parser.add_argument('--denoiser-blend-alpha', type=float, default=0.2)
+    parser.add_argument('--condition-type', type=str, default='id_graph')
+    parser.add_argument('--w-balw', type=float, default=0.0)
     args, unparsed = parser.parse_known_args()
     print(args)
 
-    run(args.d, setting=args.setting, fix_enc=args.f, log_prefix=args.note, smoke_steps=args.smoke_steps)
+    run(
+        args.d,
+        setting=args.setting,
+        fix_enc=args.f,
+        log_prefix=args.note,
+        smoke_steps=args.smoke_steps,
+        use_diffusion_denoiser=args.use_diffusion_denoiser,
+        baseline_checkpoint_path=args.baseline_checkpoint_path,
+        baseline_pretrain_epochs=args.baseline_pretrain_epochs,
+        diffusion_warmup_epochs=args.diffusion_warmup_epochs,
+        diffusion_lr=args.diffusion_lr,
+        diffusion_batch_size=args.diffusion_batch_size,
+        diffusion_steps=args.diffusion_steps,
+        beta_graph=args.beta_graph,
+        denoiser_blend_alpha=args.denoiser_blend_alpha,
+        condition_type=args.condition_type,
+        w_balw=args.w_balw,
+    )

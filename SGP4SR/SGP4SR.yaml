@@ -17,7 +17,19 @@ mb: 0.1
 fusion_temperature: 0.2
 fusion_scale: 1.6
 fusion_prior: [0.375, 0.5625, 0.0625]
-fusion_dynamic_ratio: 0.3
+fusion_dynamic_ratio: 0.1
+w_balw: 0.001
+
+use_diffusion_denoiser: False
+baseline_checkpoint_path: ''
+baseline_pretrain_epochs: 5
+diffusion_warmup_epochs: 5
+diffusion_lr: 0.001
+diffusion_batch_size: 1024
+diffusion_steps: 4
+beta_graph: 0.001
+denoiser_blend_alpha: 0.1
+condition_type: id_graph
 
 item_drop_ratio: 0.1
 item_drop_coefficient: 0.9

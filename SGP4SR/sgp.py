@@ -10,6 +10,11 @@ from recbole.model.abstract_recommender import SequentialRecommender
 from recbole.model.layers import TransformerEncoder
 from recbole.model.loss import BPRLoss
 from sklearn.cluster import KMeans, MiniBatchKMeans
+from diffusion_denoiser import GraphConditionedDiffusionDenoiser
+
+
+def cfg_get(config, key, default=None):
+    return config[key] if key in config else default
 
 
 class PointWiseFeedForward(torch.nn.Module):
@@ -74,10 +79,15 @@ class SGP(SequentialRecommender):
         self.fusion_scale = config['fusion_scale']
         self.fusion_prior = config['fusion_prior']
         self.fusion_dynamic_ratio = config['fusion_dynamic_ratio']
+        self.w_balw = float(cfg_get(config, 'w_balw', 0.0))
         self.kmeans = MiniBatchKMeans(n_clusters=self.means_k, init_size=1024, batch_size=1024, random_state=100)
         self.initializer_range = config['initializer_range']
         self.loss_type = config['loss_type']
         self.item_embedding = torch.nn.Embedding(self.n_items, self.hidden_size, padding_idx=0)
+        self.use_diffusion_denoiser = bool(cfg_get(config, 'use_diffusion_denoiser', False))
+        self.condition_type = cfg_get(config, 'condition_type', 'id_graph')
+        self.diffusion_denoiser = None
+        self._diffusion_shapes_logged = False
         self.intent_weight_mapper = IntentAwareWeightMapper(self.hidden_size, self.fusion_temperature)
         fusion_prior = torch.as_tensor(self.fusion_prior, dtype=torch.float32)
         self.register_buffer("fusion_prior_weight", fusion_prior / fusion_prior.sum())
@@ -105,17 +115,135 @@ class SGP(SequentialRecommender):
         self.knn_k_ma = self.knn_k - self.knn_k_co
         self.image_embedding = (dataset.image_embedding).to(self.device)
         self.text_embedding = (dataset.text_embedding).to(self.device)
-        self.img_embs = (self.image_embedding.weight).to(self.device)
-        self.text_embs = (self.text_embedding.weight).to(self.device)        
-        self.co_img_embs = self.co_seq @ self.img_embs 
-        self.co_text_embs = self.co_seq @ self.text_embs 
-        indices, self.co_vm_adj = self.get_knn_adj_mat(self.img_embs)
-        indices, self.co_tm_adj = self.get_knn_adj_mat(self.text_embs)
-        self.sensev, self.vsample = self.get_center(self.img_embs)
-        self.senset, self.tsample = self.get_center(self.text_embs)
+        self.raw_img_embs = self.image_embedding.weight.detach().clone().to(self.device)
+        self.raw_text_embs = self.text_embedding.weight.detach().clone().to(self.device)
+        self.build_modal_structures(self.raw_text_embs, self.raw_img_embs)
         self.loss_fct = nn.CrossEntropyLoss()
         self.apply(self._init_weights)
         self.intent_weight_mapper.reset_to_prior(self.fusion_prior)
+        if self.use_diffusion_denoiser:
+            if self.condition_type != 'id_graph':
+                raise ValueError("V1B only supports condition_type='id_graph'.")
+            self.diffusion_denoiser = GraphConditionedDiffusionDenoiser(
+                feature_dim=self.raw_text_embs.shape[1],
+                condition_dim=self.hidden_size * 2,
+                hidden_dim=max(self.hidden_size, self.raw_text_embs.shape[1]),
+                diffusion_steps=int(cfg_get(config, 'diffusion_steps', 8)),
+            ).to(self.device)
+
+    def build_modal_structures(self, text_features, image_features):
+        """Build CGC graph and CIP centers from the provided modal features."""
+        self.text_embs = text_features.detach().clone().to(self.device).float()
+        self.img_embs = image_features.detach().clone().to(self.device).float()
+        self.co_img_embs = self.co_seq @ self.img_embs
+        self.co_text_embs = self.co_seq @ self.text_embs
+        _, self.co_vm_adj = self.get_knn_adj_mat(self.img_embs)
+        _, self.co_tm_adj = self.get_knn_adj_mat(self.text_embs)
+        self.sensev, self.vsample = self.get_center(self.img_embs)
+        self.senset, self.tsample = self.get_center(self.text_embs)
+
+    def build_diffusion_condition(self, item_id_embeddings):
+        if self.condition_type != 'id_graph':
+            raise ValueError("V1B only supports condition_type='id_graph'.")
+        item_id_embeddings = item_id_embeddings.detach().to(self.device).float()
+        graph_id_embeddings = self.co_seq @ item_id_embeddings
+        condition = torch.cat([item_id_embeddings, graph_id_embeddings], dim=-1)
+        condition[0].zero_()
+        return condition
+
+    def warmup_diffusion_denoiser(self, epochs, batch_size, lr, beta_graph, logger=None):
+        if self.diffusion_denoiser is None:
+            raise RuntimeError("Diffusion denoiser is not enabled.")
+
+        original_requires_grad = {p: p.requires_grad for p in self.parameters()}
+        self.diffusion_denoiser.train()
+        for p in self.parameters():
+            p.requires_grad = False
+        for p in self.diffusion_denoiser.parameters():
+            p.requires_grad = True
+
+        learned_id = self.item_embedding.weight.detach()
+        condition = self.build_diffusion_condition(learned_id)
+        text_graph = (self.co_seq @ self.raw_text_embs).detach()
+        image_graph = (self.co_seq @ self.raw_img_embs).detach()
+        item_indices = torch.arange(1, self.n_items, device=self.device)
+        optimizer = torch.optim.Adam(self.diffusion_denoiser.parameters(), lr=lr)
+
+        if not self._diffusion_shapes_logged:
+            msg = (
+                "[diffusion] "
+                f"learned_id={tuple(learned_id.shape)} "
+                f"raw_text={tuple(self.raw_text_embs.shape)} raw_image={tuple(self.raw_img_embs.shape)} "
+                f"condition={tuple(condition.shape)} beta_graph={beta_graph}"
+            )
+            print(msg)
+            if logger is not None:
+                logger.info(msg)
+            self._diffusion_shapes_logged = True
+
+        for epoch in range(int(epochs)):
+            perm = item_indices[torch.randperm(item_indices.numel(), device=self.device)]
+            total_loss = 0.0
+            total_diff = 0.0
+            total_graph = 0.0
+            steps = 0
+            for start in range(0, perm.numel(), int(batch_size)):
+                idx = perm[start:start + int(batch_size)]
+                optimizer.zero_grad()
+                loss, diff_loss, graph_loss = self.diffusion_denoiser.warmup_loss(
+                    self.raw_text_embs[idx],
+                    self.raw_img_embs[idx],
+                    condition[idx],
+                    text_graph[idx],
+                    image_graph[idx],
+                    beta_graph,
+                )
+                loss.backward()
+                optimizer.step()
+                total_loss += float(loss.detach().cpu())
+                total_diff += float(diff_loss.cpu())
+                total_graph += float(graph_loss.cpu())
+                steps += 1
+            msg = (
+                f"[diffusion] warmup epoch {epoch + 1}/{epochs} "
+                f"loss={total_loss / max(steps, 1):.6f} "
+                f"diff={total_diff / max(steps, 1):.6f} "
+                f"graph={total_graph / max(steps, 1):.6f}"
+            )
+            print(msg)
+            if logger is not None:
+                logger.info(msg)
+
+        for p, requires_grad in original_requires_grad.items():
+            p.requires_grad = requires_grad
+        self.diffusion_denoiser.eval()
+
+    @torch.no_grad()
+    def generate_clean_modal_features(self, batch_size):
+        if self.diffusion_denoiser is None:
+            raise RuntimeError("Diffusion denoiser is not enabled.")
+        learned_id = self.item_embedding.weight.detach()
+        condition = self.build_diffusion_condition(learned_id)
+        clean_text, clean_image = [], []
+        for start in range(0, self.n_items, int(batch_size)):
+            end = min(start + int(batch_size), self.n_items)
+            text_batch, image_batch = self.diffusion_denoiser.denoise_batch(
+                self.raw_text_embs[start:end],
+                self.raw_img_embs[start:end],
+                condition[start:end],
+            )
+            clean_text.append(text_batch.detach())
+            clean_image.append(image_batch.detach())
+        text_clean = torch.cat(clean_text, dim=0)
+        image_clean = torch.cat(clean_image, dim=0)
+        text_clean[0].zero_()
+        image_clean[0].zero_()
+        msg = (
+            "[diffusion] "
+            f"clean_text={tuple(text_clean.shape)} clean_image={tuple(image_clean.shape)}"
+        )
+        print(msg)
+        return text_clean, image_clean
 
     def mod(self, build_item_graph=True):
         h = self.item_embedding.weight.to(self.device)
@@ -241,7 +369,13 @@ class SGP(SequentialRecommender):
 
         log_feats = self.last_layernorm(seqs) 
         output = self.gather_indexes(log_feats, item_seq_len - 1)   
-        return output, outputv, outputt  # [B H]    
+        return output, outputv, outputt, weights  # [B H]
+
+    def BALW(self, modality_weights):
+        """Entropy balance regularization for id/text/visual fusion weights."""
+        modality_weights = torch.clamp(modality_weights, min=1e-9)
+        n_modalities = modality_weights.size(1)
+        return torch.mean(n_modalities * torch.sum(modality_weights * torch.log(modality_weights), dim=1))
     
     def compute_max_similarity_index(self, j, i):
         similarity = torch.matmul(j, i.transpose(1, 2))
@@ -254,7 +388,7 @@ class SGP(SequentialRecommender):
         _,hmv_emb,hmt_emb = self.mod()
         item_seq = interaction[self.ITEM_SEQ]
         item_seq_len = interaction[self.ITEM_SEQ_LEN]
-        seq_output, outputv, outputt= self.forward(item_seq, item_seq_len)
+        seq_output, outputv, outputt, modality_weights = self.forward(item_seq, item_seq_len)
         pos_items = interaction[self.POS_ITEM_ID]
 
         if self.loss_type == 'BPR':
@@ -264,7 +398,6 @@ class SGP(SequentialRecommender):
             pos_score = torch.sum(seq_output * pos_items_emb, dim=-1)  # [B]
             neg_score = torch.sum(seq_output * neg_items_emb, dim=-1)  # [B]
             loss = self.loss_fct(pos_score, neg_score)
-            return loss
         else:  # self.loss_type = 'CE'
             test_item_emb = self.item_embedding.weight
             logits = torch.matmul(seq_output, test_item_emb.transpose(0, 1))
@@ -274,13 +407,16 @@ class SGP(SequentialRecommender):
             logits = torch.matmul(outputt, hmt_emb.transpose(0, 1))
             loss += (1 - self.mb) * self.loss_fct(logits, pos_items)
 
+        if self.w_balw > 0:
+            loss += self.w_balw * self.BALW(modality_weights)
+
         return loss
 
     def full_sort_predict(self, interaction):
         h,vcoh,tcoh = self.mod()
         item_seq = interaction[self.ITEM_SEQ]
         item_seq_len = interaction[self.ITEM_SEQ_LEN]
-        seq_output, outputv, outputt= self.forward(item_seq, item_seq_len)
+        seq_output, outputv, outputt, _ = self.forward(item_seq, item_seq_len)
         test_items_emb = self.item_embedding.weight
         scores = torch.matmul(seq_output, test_items_emb.transpose(0, 1))  # [B n_items]
         scores += self.mb * torch.matmul(outputv, vcoh.transpose(0, 1))  # [B]
@@ -317,7 +453,7 @@ class SGP(SequentialRecommender):
             c[i][:len(common_elements)] = torch.tensor(common_elements, dtype=torch.int64)
             c[i][len(common_elements):] = torch.tensor(remaining_elements[:n - len(common_elements)], dtype=torch.int64)
         
-        return c.cuda()
+        return c.to(self.device)
 
     def get_knn_adj_mat(self, mm_embeddings):
         context_norm = mm_embeddings.div(torch.norm(mm_embeddings, p=2, dim=-1, keepdim=True))

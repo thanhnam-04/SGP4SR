@@ -20,7 +20,10 @@ from utils import EarlyStopping, get_user_seqs, check_path, set_seed
 def show_args_info(args):
     print(f"--------------------Configure Info:------------")
     for arg in vars(args):
-        print(f"{arg:<30} : {getattr(args, arg):>35}")
+        value = getattr(args, arg)
+        if isinstance(value, (list, tuple, dict, set)):
+            value = f"{type(value).__name__}(len={len(value)})"
+        print(f"{arg:<30} : {str(value):>35}")
 
 
 def main():

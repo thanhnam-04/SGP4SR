@@ -1,4 +1,5 @@
 
+import json
 import numpy as np
 from tqdm import tqdm
 import random
@@ -75,27 +76,28 @@ class Trainer:
         return [HIT_1, NDCG_1, HIT_5, NDCG_5, HIT_10, NDCG_10, MRR], str(post_fix)
 
     def get_full_sort_score(self, epoch, answers, pred_list):
-        recall, ndcg = [], []
-        for k in [1, 5, 10, 15, 20]:
-            recall.append(recall_at_k(answers, pred_list, k))
-            ndcg.append(ndcg_k(answers, pred_list, k))
-        mrr = cal_mrr(answers, pred_list)
+        topks = [5, 10, 20, 50]
+        recall = {k: recall_at_k(answers, pred_list, k) for k in topks}
+        ndcg = {k: ndcg_k(answers, pred_list, k) for k in topks}
         post_fix = {
-            "Epoch": epoch,
-            "HIT@1": "{:.4f}".format(recall[0]),
-            "NDCG@1": "{:.4f}".format(ndcg[0]),
-            "HIT@5": "{:.4f}".format(recall[1]),
-            "NDCG@5": "{:.4f}".format(ndcg[1]),
-            "HIT@10": "{:.4f}".format(recall[2]),
-            "NDCG@10": "{:.4f}".format(ndcg[2]),
-            "HIT@20": "{:.4f}".format(recall[4]),
-            "NDCG@20": "{:.4f}".format(ndcg[4]),
-            "MRR": "{:.4f}".format(mrr),
+            "recall@5": round(recall[5], 4),
+            "recall@10": round(recall[10], 4),
+            "recall@20": round(recall[20], 4),
+            "recall@50": round(recall[50], 4),
+            "ndcg@5": round(ndcg[5], 4),
+            "ndcg@10": round(ndcg[10], 4),
+            "ndcg@20": round(ndcg[20], 4),
+            "ndcg@50": round(ndcg[50], 4),
         }
-        print(post_fix)
+        result_info = json.dumps(post_fix, indent=2)
+        print(result_info)
         with open(self.args.log_file, "a") as f:
-            f.write(str(post_fix) + "\n")
-        return [recall[0], ndcg[0], recall[1], ndcg[1], recall[2], ndcg[2], recall[3], ndcg[3], mrr], str(post_fix)
+            f.write(result_info + "\n")
+        scores = [
+            recall[5], recall[10], recall[20], recall[50],
+            ndcg[5], ndcg[10], ndcg[20], ndcg[50],
+        ]
+        return scores, result_info
 
 
 
@@ -248,7 +250,8 @@ class ICLRecTrainer(Trainer):
                     rating_pred[self.args.train_matrix[batch_user_index].toarray() > 0] = 0
                     # reference: https://stackoverflow.com/a/23734295, https://stackoverflow.com/a/20104162
                     # argpartition T: O(n)  argsort O(nlogn)
-                    ind = np.argpartition(rating_pred, -20)[:, -20:]
+                    top_k = min(50, rating_pred.shape[1])
+                    ind = np.argpartition(rating_pred, -top_k)[:, -top_k:]
                     arr_ind = rating_pred[np.arange(len(rating_pred))[:, None], ind]
                     arr_ind_argsort = np.argsort(arr_ind)[np.arange(len(rating_pred)), ::-1]
                     batch_pred_list = ind[np.arange(len(rating_pred))[:, None], arr_ind_argsort]
